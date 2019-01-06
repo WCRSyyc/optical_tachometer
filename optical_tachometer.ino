@@ -1,152 +1,190 @@
 /* Optical Tachometer
 
-Code from
-https://www.instructables.com/id/Measure-RPM-DIY-Portable-Digital-Tachometer/
+  Measure the time needed for some number of  sensor transitions, and calculate
+  RPM that implies, assuming a single transition (in one direction) per revolution.
 
+  Reference: https://www.instructables.com/id/Measure-RPM-DIY-Portable-Digital-Tachometer/
 */
-#include<ShiftLCD.h>
 
-ShiftLCD lcd(8 ,10 , 9);    // DEFINE LCD PINS
+#include<LiquidCrystal595.h>
 
-volatile byte REV;       //  VOLATILE DATA TYPE TO STORE REVOLUTIONS
+const int RPM_POWER_PIN = 3;   // VCC for sensor
+const int RPM_GROUND_PIN = 4;  // Ground for sensor
+const int RPM_SENSOR_PIN = 2;  // Interrupt sense
+const int STATUS_LED_PIN = 12;
+// 300, 600, 1200, 2400, 4800, 9600, 14400, 19200, 28800, 38400, 57600, 115200
+const long SERIAL_BAUD = 9600;
+const unsigned long SPLASH_LENGTH = 2000;  // 2 Seconds to show startup splash screen
+const unsigned long PAGE_LENGTH = 2000;  // 2 Seconds before advance to next page
+const unsigned long UPDATE_THROTTLE = 500;  // 0.5 Second between RPM display changes
+const unsigned long IDLE_TIMEOUT = 5000;  // milliseconds to wait for new measurement
+const unsigned int UPDATE_COUNT = 5;  // Minimum revolutions to use for calculations
+const unsigned int TICKS_PER_REV = 1;  // Number of transitions per revolution
 
-unsigned long int rpm, maxRPM;  //  DEFINE RPM AND MAXIMUM RPM
+LiquidCrystal595 lcd(8 ,10 , 9);  // Define pins used for LCD
+// volatile byte revolutionCount;
+volatile unsigned int revolutionCount;    // volatile (updated by interrupt handler)
+unsigned long int maxRPM;  // Maximum RPM measurement
+unsigned long measureStartTime;  // time latest measurement was started
+int measureStatus = LOW;       // Status LED state (value); toggled to show working
+int RPMprevLen = 0;     // Previous RPM value displayed length
+bool clearLCD = true;   // Flag showing when LCD screen needs to be cleared
+unsigned long idleStart = 0;  // previous time a measurement was recorded
 
-unsigned long time;         //  DEFINE TIME TAKEN TO COVER ONE REVOLUTION
+void setup()
+{
+  // Serial.begin(SERIAL_BAUD);
+  lcd.begin(16, 2);     // Initialize LCD screen
 
-int ledPin = 12;           //   STATUS LED
+  // Call Interrupt handler function on each LOW to HIGH transition
+  attachInterrupt(digitalPinToInterrupt(RPM_SENSOR_PIN), revolutionCounter, RISING);
 
-int led = 0,RPMlen , prevRPM;  //  INTEGERS TO STORE LED VALUE AND CURRENT RPM AND PREVIOUS RPM
+  pinMode(STATUS_LED_PIN, OUTPUT);
+  pinMode(RPM_POWER_PIN, OUTPUT);  // Setup power for the optical sensor
+  pinMode(RPM_GROUND_PIN, OUTPUT);
+  digitalWrite(RPM_POWER_PIN, HIGH);
+  digitalWrite(RPM_GROUND_PIN, LOW);
 
-int flag = 0;             //  A VARIABLE TO DETERMINE WHETHER THE LCD NEEDS TO BE CLEARED OR NOT
+  lcd.print(F("TACHOMETER"));   // Sketch startup title text
+  lcd.setCursor(0, 1);
+  lcd.print(F("- WCRS"));
+  delay(SPLASH_LENGTH);  // Leave the splash screen up for awhile
+  lcd.clear();
 
-long prevtime = 0;       //  STORE IDLE TIME TO TOGGLE MENU
+  revolutionCount = 0;
+  measureStartTime = 0;
+} // ./setup()
 
- void setup()
- {
-     Serial.begin(9600);   // GET VALUES USING SERIAL MONITOR
+void loop()
+{
+  unsigned long currtime = millis(); // The current time
+  unsigned long idletime = currtime - idleStart;  // Time since last measurement
 
-     lcd.begin(16, 2);     // INITIATE LCD
+  if(revolutionCount >= UPDATE_COUNT ) {  // It´s time to report a new (raw) measurement
+    reportLatestRPM();
+    idleStart = currtime;  // Just had a new reading; reset start idle interval to now
+  }
 
-     attachInterrupt(0, RPMCount, RISING);     //  ADD A HIGH PRIORITY ACTION ( AN INTERRUPT)  WHEN THE SENSOR GOES FROM LOW TO HIGH
-
-     REV = 0;      //  START ALL THE VARIABLES FROM 0
-
-     rpm = 0;
-
-     time = 0;
-
-     pinMode(ledPin, OUTPUT);
-
-     pinMode(3, OUTPUT);
-
-     pinMode(4, OUTPUT);
-
-     digitalWrite(3, HIGH);             //  VCC PIN FOR SENSOR
-
-     digitalWrite(4, LOW);              // GND PIN FOR SENSOR
-
-     lcd.print("TACHOMETER");           //   STARTUP TEXT
-     lcd.setCursor(0, 1);
-     lcd.print("- ELECTRO18");          //  THAT'S ME
-     delay(2000);
-     lcd.clear();
-
- }
-
- void loop()
- {
-  long currtime = millis();                 // GET CURRENT TIME
-
-  long idletime = currtime - prevtime;        //  CALCULATE IDLE TIME
-
-    if(REV >= 5 )                  //  IT WILL UPDATE AFETR EVERY 5 READINGS
-   {
-
-
-     if(flag==0)                     //  CLEAR THE LCD TO AVOID ANY GARBAGE TEXT
-     {
-       lcd.clear();
-       lcd.print("SENSOR MEASURING");
-       flag=1;                          //   AFTER FLAG = 1 , THE LOOP WILL NOT EXECUTE AGAIN
-     }
-
-     rpm = 30*1000/(millis() - time)*REV;       //  CALCULATE  RPM USING REVOLUTIONS AND ELAPSED TIME
-
-     if(rpm > maxRPM)
-     maxRPM = rpm;                             //  GET THE MAX RPM THROUGHOUT THE RUN
-
-     time = millis();
-
-     REV = 0;
-
-     int x= rpm;                                //  CALCULATE NUMBER OF DIGITS IN RPM
-     while(x!=0)
-     {
-       x = x/10;
-       RPMlen++;
-     }
+  if(idletime > IDLE_TIMEOUT) {  // There has been no new reading for awhile
+    showMaxRPM();  // Show the maximum RPM
+    idleStart = currtime;
+  }
+} // ./loop()
 
 
+/**
+ * revolutionCounter Interrupt handler
+ *
+ * Every time the sensor goes from LOW to HIGH, this function will be called
+ */
+void revolutionCounter()
+{
+  revolutionCount++;  // Increment the number of revolutions
 
-     if(RPMlen!=prevRPM)                             // IF THE RPM FALLS TO A LOWER NUMBER WITH LESS DIGITS , THE LCD WILL GET CLEARED
-     {
-       lcd.clear();
-       prevRPM = RPMlen;
-       flag=0;
-       lcd.print("SENSOR MEASURING");
-     }
+  // IDEA: move the toggle to the main loop; toggle if count changed; get rid of delay() calls
+  if (measureStatus == LOW) {
+    measureStatus = HIGH;
+  } else {
+    measureStatus = LOW;
+  }
+  digitalWrite(STATUS_LED_PIN, measureStatus);  // Toggle the status LED
+} // ./ revolutionCounter()
 
-     lcd.setCursor(0, 1);
-     lcd.print(rpm,DEC);                        //  PRINT RPM IN DECIMAL SYSTEM
 
-     lcd.setCursor(6,1);
-     lcd.print("RPM");
-     delay(500);
+/**
+ * report latest measured RPM
+ */
+void reportLatestRPM()
+{
+  /* RPM: revolutions per minute == revolutions / minutes == rev / 60 sec == rev / 60000 milliseconds
+   * ms = (millis() - measureStartTime)
+   * rev = revolutions / TICKS_PER_REV
+   *
+   * rpm = (60000 * rev) / ms ¦ =
+   *
+   * rpm = (revolutions / TICKS_PER_REV) * 60000 ) / (millis() - measureStartTime)
+   *
+   * Something is wrong in the calculation here
+  */
+  // Calculate the RPM using the time needed for the number of revolutions seen
+  unsigned long int measuredRPM = 30 * 1000 / (millis() - measureStartTime) * revolutionCount;
+  measureStartTime = millis();  // Start a new measurement
+  revolutionCount = 0;
 
-     prevtime = currtime;                        // RESET IDLETIME
+  if(clearLCD) {  // Clear the LCD to avoid any garbage text
+    lcd.clear();
+    lcd.print(F("SENSOR MEASURING"));  // Title for raw measurement
+    clearLCD = false;  // Prevent (additional) clearing of the screen
+  }
 
-   }
+  if(measuredRPM > maxRPM) {
+    maxRPM = measuredRPM;   //  Track the maximum RPM reading seen
+  }
 
-   if(idletime > 5000 )                      //  IF THERE ARE NO READING FOR 5 SEC , THE SCREEN WILL SHOW MAX RPM
-   {
+  showRawRPM(measuredRPM);
+} // ./ reportLatestRPM
 
-     if(flag==1)                            // CLEAR THE LCD
-     {
-       lcd.clear();
-       flag=0;
-     }
 
-     lcd.clear();
-     lcd.print("MAXIMUM RPM");
-     lcd.setCursor(0, 1);
-     lcd.print(maxRPM,DEC);                     // DISPLAY MAX RPM
-     lcd.print("   RPM");
-     delay(2000);
-     lcd.clear();
-     lcd.print("IDLE STATE");
-     lcd.setCursor(0, 1);
-     lcd.print("READY TO MEASURE");
-     delay(2000);
-     prevtime = currtime;
-   }
+/**
+ * Determine the number of decimal digits needed to display an int value
+ *
+ * TODO test this for a range of values, including zero and negative
+ *
+ * @param value - integer value to count the decimal digits in
+ */
+unsigned int decimalDigits(int value)
+{
+  unsigned int digitCount = 0;
+  int x = value;
+  while(x != 0) {
+    x /= 10;
+    digitCount++;
+  }
+  return digitCount;
+}
 
- }
 
- void RPMCount()                                // EVERYTIME WHEN THE SENSOR GOES FROM LOW TO HIGH , THIS FUNCTION WILL BE INVOKED
- {
-   REV++;                                         // INCREASE REVOLUTIONS
+/** showRawRPM
+ *
+ * Display the latest RPM measurement
+ *
+ * @param rpmValue - revolutions per minute value
+ */
+void showRawRPM(int rpmValue)
+{
+  int RPMcurLen = decimalDigits(rpmValue);  // Current RPM value displayed length
+  if(RPMcurLen < RPMprevLen) {  // Fewer digits in the RPM display value than before
+    lcd.clear();
+    RPMprevLen = RPMcurLen;
+    clearLCD = false;
+    lcd.print(F("SENSOR MEASURING"));
+  }
 
-   if (led == LOW)
-   {
+  lcd.setCursor(0, 1);
+  lcd.print(rpmValue, DEC);  // Show calculated RPM as a decimal value
 
-     led = HIGH;                                 //  TOGGLE STATUS LED
-   }
+  lcd.setCursor(6,1);
+  lcd.print(F("RPM"));
+  delay(UPDATE_THROTTLE);  // Make sure the display stays still long enough to read
+} // ./showRawRPM()
 
-   else
-   {
-     led = LOW;
-   }
-   digitalWrite(ledPin, led);
- }
-//////////////////////////////////////////////////////////////  END OF THE PROGRAM  ///////////////////////////////////////////////////////////////////////
+
+/** showMaxRPM
+ *
+ * Display the maximum RPM value seen so far
+ */
+void showMaxRPM() {
+  clearLCD = false;
+  lcd.clear();
+  lcd.print(F("MAXIMUM RPM"));
+  lcd.setCursor(0, 1);
+  lcd.print(maxRPM, DEC);  // Display the maximum recorded RPM
+  lcd.print(F("   RPM"));
+  delay(PAGE_LENGTH);
+
+  lcd.clear();
+  lcd.print(F("IDLE STATE"));
+  lcd.setCursor(0, 1);
+  lcd.print(F("READY TO MEASURE"));
+  // delay(PAGE_LENGTH);
+} // ./showMaxRPM
