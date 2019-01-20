@@ -21,7 +21,7 @@ const unsigned long IDLE_TIMEOUT = 5000;  // milliseconds to wait for new measur
 const unsigned int UPDATE_COUNT = 5;  // Minimum revolutions to use for calculations
 const unsigned int TICKS_PER_REV = 1;  // Number of transitions per revolution
 
-LiquidCrystal595 lcd(8 ,10 , 9);  // Define pins used for LCD
+LiquidCrystal595 lcd(7 ,8 , 9);  // Define pins used for LCD
 // volatile byte revolutionCount;
 volatile unsigned int revolutionCount;    // volatile (updated by interrupt handler)
 unsigned long int maxRPM;  // Maximum RPM measurement
@@ -35,6 +35,7 @@ void setup()
 {
   // Serial.begin(SERIAL_BAUD);
   lcd.begin(16, 2);     // Initialize LCD screen
+  lcd.setLED2Pin(HIGH); // Turn on Backlight
 
   // Call Interrupt handler function on each LOW to HIGH transition
   attachInterrupt(digitalPinToInterrupt(RPM_SENSOR_PIN), revolutionCounter, RISING);
